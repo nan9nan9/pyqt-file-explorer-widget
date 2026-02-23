@@ -7,6 +7,7 @@ glob 패턴 필터링 기능 지원
 import os
 import sys
 import fnmatch
+import re
 from datetime import datetime
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QFileInfo, QThread, pyqtSignal, QSortFilterProxyModel
 from PyQt6.QtGui import QIcon
@@ -20,53 +21,60 @@ class DirectoryLoader(QThread):
     """백그라운드에서 디렉토리 항목을 스캔하는 QThread 워커"""
 
     chunk_ready = pyqtSignal(list)  # 청크 단위 결과 전달
-    finished = pyqtSignal(list)  # 전체 완료
+    finished = pyqtSignal()  # 전체 완료
 
-    def __init__(self, path: str, glob_pattern: str = None):
-        super().__init__()
+    def __init__(self, path: str, glob_pattern: str = None, parent=None):
+        super().__init__(parent)
         self.path = path
         self.glob_pattern = glob_pattern  # glob 필터 패턴
         self._cancelled = False
         self._chunk_size = 500  # 청크 크기
+        self._glob_matcher = None
+        if glob_pattern:
+            self._glob_matcher = re.compile(fnmatch.translate(glob_pattern)).match
 
     def run(self):
         """디렉토리를 스캔하고 항목 정보를 수집한다."""
         try:
-            items = []
             chunk = []
 
             with os.scandir(self.path) as entries:
                 for entry in entries:
                     # 취소 플래그 확인
-                    if self._cancelled:
+                    if self._cancelled or self.isInterruptionRequested():
                         return
 
                     # glob 패턴이 지정된 경우 필터링
-                    if self.glob_pattern:
-                        if not fnmatch.fnmatch(entry.name, self.glob_pattern):
-                            continue
+                    if self._glob_matcher and not self._glob_matcher(entry.name):
+                        continue
 
-                    try:
-                        # stat 정보 한 번에 가져오기
-                        stat_info = entry.stat(follow_symlinks=False)
-                        size = stat_info.st_size
-                        modified = stat_info.st_mtime
-                    except (OSError, PermissionError):
-                        # 권한 없음 등의 오류 처리
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if is_dir:
+                        # 디렉토리는 stat 비용을 줄이기 위해 메타데이터를 지연/생략
                         size = None
                         modified = None
+                    else:
+                        try:
+                            # 파일에 대해서만 stat 수행
+                            stat_info = entry.stat(follow_symlinks=False)
+                            size = stat_info.st_size
+                            modified = stat_info.st_mtime
+                        except (OSError, PermissionError):
+                            # 권한 없음 등의 오류 처리
+                            size = None
+                            modified = None
 
                     item_dict = {
                         "name": entry.name,
                         "path": entry.path,
-                        "is_dir": entry.is_dir(follow_symlinks=False),
-                        "is_file": entry.is_file(follow_symlinks=False),
+                        "is_dir": is_dir,
                         "size": size,
                         "modified": modified,
+                        "display_size": self._format_size(size),
+                        "display_modified": self._format_modified(modified),
                     }
 
                     chunk.append(item_dict)
-                    items.append(item_dict)
 
                     # 청크 크기에 도달하면 신호 발송
                     if len(chunk) >= self._chunk_size:
@@ -79,20 +87,47 @@ class DirectoryLoader(QThread):
 
             # 전체 완료 신호
             if not self._cancelled:
-                self.finished.emit(items)
+                self.finished.emit()
 
         except Exception as e:
             print(f"디렉토리 스캔 오류: {e}")
-            self.finished.emit([])
+            self.finished.emit()
 
     def cancel(self):
         """로딩을 취소한다."""
         self._cancelled = True
-        self.wait()
+        self.requestInterruption()
+
+    @staticmethod
+    def _format_size(size: int | None) -> str:
+        """파일 크기를 사람이 읽기 쉬운 형태로 변환한다."""
+        if size is None:
+            return "—"
+
+        size_float = float(size)
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size_float < 1024:
+                return f"{size_float:.1f} {unit}"
+            size_float /= 1024
+
+        return "—"
+
+    @staticmethod
+    def _format_modified(timestamp: float | None) -> str:
+        """수정 시간을 포맷팅한다."""
+        if timestamp is None:
+            return "—"
+
+        try:
+            dt = datetime.fromtimestamp(timestamp)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return "—"
 
 
 class FileTableModel(QAbstractTableModel):
     """파일/디렉토리 목록을 표시하는 커스텀 테이블 모델"""
+    loading_finished = pyqtSignal()
 
     # 컬럼 정의
     COLUMN_NAME = 0
@@ -131,8 +166,7 @@ class FileTableModel(QAbstractTableModel):
         self._current_path = path
 
         # 이전 로더가 실행 중이면 취소
-        if self._loader is not None:
-            self._loader.cancel()
+        self.stop_loading()
 
         # 모델 초기화
         self.beginResetModel()
@@ -142,26 +176,25 @@ class FileTableModel(QAbstractTableModel):
         # .. 항목을 미리 추가 (루트가 아닐 경우, glob 필터가 없을 때만)
         parent_dir = os.path.dirname(path)
         if not glob_pattern and parent_dir and parent_dir != path:
-            parent_item = {
-                "name": "..",
-                "path": parent_dir,
-                "is_dir": True,
-                "is_file": False,
-                "size": None,
-                "modified": None,
-            }
+            parent_item = self._create_parent_item(parent_dir)
             self.beginInsertRows(QModelIndex(), 0, 0)
             self._items.append(parent_item)
             self.endInsertRows()
 
         # 새로운 로더 생성
-        self._loader = DirectoryLoader(path, glob_pattern)
+        self._loader = DirectoryLoader(path, glob_pattern, self)
         self._loader.chunk_ready.connect(self._on_chunk_ready)
         self._loader.finished.connect(self._on_finished)
+        self._loader.finished.connect(self._loader.deleteLater)
         self._loader.start()
 
     def _on_chunk_ready(self, chunk: list):
         """청크 단위 결과를 받아 모델에 추가한다."""
+        if self.sender() is not self._loader:
+            return
+        if not chunk:
+            return
+
         # 이미 항목이 있는 경우 시작 위치 계산
         start_row = len(self._items)
         end_row = start_row + len(chunk) - 1
@@ -170,43 +203,31 @@ class FileTableModel(QAbstractTableModel):
         self._items.extend(chunk)
         self.endInsertRows()
 
-    def _on_finished(self, all_items: list):
+    def _on_finished(self):
         """전체 로딩이 완료되었다."""
-        # 청크로 이미 추가된 항목이 없으면 전체를 한 번에 추가
-        if not self._items:
-            self.beginResetModel()
-            self._items = all_items
-            self.endResetModel()
+        if self.sender() is not self._loader:
+            return
 
-        # 정렬: .. → 디렉토리 → 파일
-        self._sort_items()
+        self._loader = None
+        self.loading_finished.emit()
 
-    def _sort_items(self):
-        """항목을 정렬한다: .. → 디렉토리(이름순) → 파일(이름순)"""
-        parent_item = None
-        directories = []
-        files = []
+    def stop_loading(self):
+        """실행 중인 로더가 있으면 정지 요청한다."""
+        if self._loader is not None:
+            self._loader.cancel()
 
-        for item in self._items:
-            if item["name"] == "..":
-                parent_item = item
-            elif item["is_dir"]:
-                directories.append(item)
-            else:
-                files.append(item)
-
-        # 각각 이름순으로 정렬
-        directories.sort(key=lambda x: x["name"].lower())
-        files.sort(key=lambda x: x["name"].lower())
-
-        # 재조립
-        self.beginResetModel()
-        self._items = []
-        if parent_item:
-            self._items.append(parent_item)
-        self._items.extend(directories)
-        self._items.extend(files)
-        self.endResetModel()
+    @staticmethod
+    def _create_parent_item(parent_dir: str) -> dict:
+        """상위 디렉토리(..) 항목을 생성한다."""
+        return {
+            "name": "..",
+            "path": parent_dir,
+            "is_dir": True,
+            "size": None,
+            "modified": None,
+            "display_size": "",
+            "display_modified": "",
+        }
 
     def _get_icon(self, item: dict) -> QIcon:
         """항목의 아이콘을 반환한다 (캐시 활용)."""
@@ -228,29 +249,6 @@ class FileTableModel(QAbstractTableModel):
                 self._icon_cache[ext] = self._icon_cache.get("__file__", QIcon())
 
         return self._icon_cache.get(ext, QIcon())
-
-    def _format_size(self, size: int | None) -> str:
-        """파일 크기를 사람이 읽기 쉬운 형태로 변환한다."""
-        if size is None:
-            return "—"
-
-        for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-
-        return "—"
-
-    def _format_modified(self, timestamp: float | None) -> str:
-        """수정 시간을 포맷팅한다."""
-        if timestamp is None:
-            return "—"
-
-        try:
-            dt = datetime.fromtimestamp(timestamp)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            return "—"
 
     def rowCount(self, parent=QModelIndex()) -> int:
         """행 개수."""
@@ -275,7 +273,7 @@ class FileTableModel(QAbstractTableModel):
                 # .. 항목은 크기 표시 안 함
                 if item["name"] == "..":
                     return ""
-                return self._format_size(item["size"])
+                return item.get("display_size", DirectoryLoader._format_size(item["size"]))
             elif col == self.COLUMN_TYPE:
                 # .. 항목은 타입 표시 안 함
                 if item["name"] == "..":
@@ -285,12 +283,14 @@ class FileTableModel(QAbstractTableModel):
                 # .. 항목은 수정일시 표시 안 함
                 if item["name"] == "..":
                     return ""
-                return self._format_modified(item["modified"])
+                return item.get("display_modified", DirectoryLoader._format_modified(item["modified"]))
 
         elif role == Qt.ItemDataRole.DecorationRole:
             # 첫 번째 컬럼에만 아이콘 표시
             if index.column() == self.COLUMN_NAME:
                 return self._get_icon(item)
+        elif role == Qt.ItemDataRole.UserRole:
+            return item
 
         return None
 
@@ -365,6 +365,51 @@ class NavigationBar(QWidget):
         self.forward_btn.setEnabled(enabled)
 
 
+class ExplorerSortProxyModel(QSortFilterProxyModel):
+    """파일 탐색기 정렬 규칙(.. 우선, 디렉토리 우선)을 적용하는 프록시 모델"""
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        left_item = left.data(Qt.ItemDataRole.UserRole)
+        right_item = right.data(Qt.ItemDataRole.UserRole)
+
+        if not isinstance(left_item, dict) or not isinstance(right_item, dict):
+            return super().lessThan(left, right)
+
+        left_name = left_item.get("name", "")
+        right_name = right_item.get("name", "")
+
+        # 상위 디렉토리(..)는 항상 최상단
+        if left_name == ".." and right_name != "..":
+            return True
+        if right_name == ".." and left_name != "..":
+            return False
+
+        # 디렉토리를 파일보다 우선 배치
+        left_is_dir = bool(left_item.get("is_dir"))
+        right_is_dir = bool(right_item.get("is_dir"))
+        if left_is_dir != right_is_dir:
+            return left_is_dir
+
+        col = left.column()
+        if col == FileTableModel.COLUMN_SIZE:
+            left_size = left_item.get("size")
+            right_size = right_item.get("size")
+            left_size = -1 if left_size is None else left_size
+            right_size = -1 if right_size is None else right_size
+            return left_size < right_size
+
+        if col == FileTableModel.COLUMN_MODIFIED:
+            left_modified = left_item.get("modified")
+            right_modified = right_item.get("modified")
+            left_modified = -1 if left_modified is None else left_modified
+            right_modified = -1 if right_modified is None else right_modified
+            return left_modified < right_modified
+
+        left_text = str(left.data(Qt.ItemDataRole.DisplayRole) or "").lower()
+        right_text = str(right.data(Qt.ItemDataRole.DisplayRole) or "").lower()
+        return left_text < right_text
+
+
 def parse_path_with_pattern(input_path: str):
     """경로와 glob 패턴을 분리한다.
 
@@ -414,9 +459,10 @@ class FileExplorerWidget(QWidget):
         self.model = FileTableModel()
 
         # 정렬 필터 프록시 모델
-        self.proxy_model = QSortFilterProxyModel()
+        self.proxy_model = ExplorerSortProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.proxy_model.setDynamicSortFilter(False)  # 삽입 시 자동 재정렬 비활성화
+        self.model.loading_finished.connect(self._resort_proxy)
 
         # 테이블 뷰
         self.table_view = QTableView()
@@ -425,6 +471,7 @@ class FileExplorerWidget(QWidget):
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.verticalHeader().setDefaultSectionSize(24)  # 행 높이 설정
         self.table_view.setSortingEnabled(True)  # 헤더 클릭으로 정렬 활성화
+        self.table_view.sortByColumn(FileTableModel.COLUMN_NAME, Qt.SortOrder.AscendingOrder)
         self.table_view.doubleClicked.connect(self._on_double_clicked)
 
         # 헤더 설정
@@ -506,21 +553,23 @@ class FileExplorerWidget(QWidget):
 
     def _navigate(self, path: str):
         """실제 네비게이션 처리."""
+        self._apply_navigation_state(path)
+
+        # 모델 로드
+        self.model.load(path)
+
+    def _apply_navigation_state(self, path: str):
+        """현재 경로와 네비게이션 버튼 상태를 반영한다."""
         self._current_path = path
         self.nav_bar.update_path(path)
         self.nav_bar.set_back_enabled(len(self._back_stack) > 0)
         self.nav_bar.set_forward_enabled(len(self._forward_stack) > 0)
 
-        # 모델 로드
-        self.model.load(path)
-
-        # 정렬 다시 설정
-        self.proxy_model.sort(-1, Qt.SortOrder.AscendingOrder)
-
     def _navigate_with_pattern(self, dir_path: str, glob_pattern: str):
         """glob 패턴과 함께 네비게이션을 처리한다."""
         # 주소 바에 전체 경로 + 패턴 표시
         display_path = os.path.join(dir_path, glob_pattern)
+        self._current_path = dir_path
         self.nav_bar.update_path(display_path)
         self.nav_bar.set_back_enabled(False)
         self.nav_bar.set_forward_enabled(False)
@@ -528,8 +577,20 @@ class FileExplorerWidget(QWidget):
         # 모델 로드 (glob 패턴 포함)
         self.model.load(dir_path, glob_pattern)
 
-        # 정렬 다시 설정
-        self.proxy_model.sort(-1, Qt.SortOrder.AscendingOrder)
+    def _resort_proxy(self):
+        """모델 로딩 완료 시 현재 헤더 기준으로 정렬을 적용한다."""
+        header = self.table_view.horizontalHeader()
+        section = header.sortIndicatorSection()
+        order = header.sortIndicatorOrder()
+        if section < 0:
+            section = FileTableModel.COLUMN_NAME
+            order = Qt.SortOrder.AscendingOrder
+        self.proxy_model.sort(section, order)
+
+    def closeEvent(self, event):
+        """위젯 종료 시 백그라운드 로더를 정리한다."""
+        self.model.stop_loading()
+        super().closeEvent(event)
 
 
 # 스탠드얼론 실행용
