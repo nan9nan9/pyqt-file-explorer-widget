@@ -18,6 +18,7 @@
 - `..` 더블클릭 시 상위 디렉토리로 이동한다.
 - 디렉토리는 항상 파일보다 위에 정렬한다 (정렬 순서: `..` → 디렉토리들 → 파일들).
 - 숨김 파일은 기본적으로 숨기고 토글 옵션을 제공한다.
+-
 
 ### 성능 최적화 (필수 — 수만 개 이상의 항목 대응)
 디렉토리에 파일/폴더가 수만~수십만 개일 때도 UI가 멈추지 않아야 한다.
@@ -113,6 +114,7 @@ file_explorer/
 
 ### `NavigationBar(QWidget)` — navigation_bar.py
 - 뒤로/앞으로 버튼 + 경로 입력 QLineEdit로 구성한다.
+- 경로 입력 QLineEdit는 Dir 경로 뿐만 아니라 예를들어 "/home/jekai/workspace/test/pyqt-explorer-widget/*.py" 라고 입력하면 *.py만 보여주도록 필터링 기능도 한다.
 - 시그널: `path_changed(str)`, `back_requested()`, `forward_requested()`
 
 ### `main.py`
@@ -133,3 +135,7 @@ file_explorer/
 cd file_explorer
 python main.py
 ```
+
+## 추가 배포
+- 단일 파일로 관리할 수 있도록 file_explorer 에 있는것 들을 하나의 파일로 만들어줘
+- file_explorer_single.py 로 만들어
