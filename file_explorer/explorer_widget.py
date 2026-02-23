@@ -7,6 +7,27 @@ from file_model import FileTableModel
 from navigation_bar import NavigationBar
 
 
+def parse_path_with_pattern(input_path: str):
+    """경로와 glob 패턴을 분리한다.
+
+    예: "/home/user/*.py" -> ("/home/user", "*.py")
+    예: "/home/user" -> ("/home/user", None)
+    """
+    # * 또는 ? 가 포함되어 있으면 glob 패턴으로 간주
+    if '*' in input_path or '?' in input_path:
+        # 마지막 경로 구분자를 찾아서 디렉토리와 패턴 분리
+        last_sep_idx = input_path.rfind(os.sep)
+        if last_sep_idx != -1:
+            dir_path = input_path[:last_sep_idx]
+            pattern = input_path[last_sep_idx + 1:]
+            return dir_path, pattern
+        else:
+            # 구분자가 없으면 현재 디렉토리에서 패턴 적용
+            return os.getcwd(), input_path
+
+    return input_path, None
+
+
 class FileExplorerWidget(QWidget):
     """파일 탐색기 메인 위젯"""
 
@@ -65,10 +86,21 @@ class FileExplorerWidget(QWidget):
         layout.addWidget(self.table_view)
         self.setLayout(layout)
 
-    def _on_path_changed(self, path: str):
+    def _on_path_changed(self, input_path: str):
         """사용자가 경로를 변경했을 때."""
-        if os.path.isdir(path):
-            self.navigate_to(path)
+        # 경로와 glob 패턴을 분리
+        dir_path, glob_pattern = parse_path_with_pattern(input_path)
+
+        # 절대 경로로 변환
+        dir_path = os.path.abspath(dir_path)
+
+        if os.path.isdir(dir_path):
+            if glob_pattern:
+                # glob 패턴이 있으면 경로와 패턴을 함께 전달
+                self._navigate_with_pattern(dir_path, glob_pattern)
+            else:
+                # 일반 경로 네비게이션
+                self.navigate_to(dir_path)
 
     def _on_back(self):
         """뒤로가기."""
@@ -123,6 +155,20 @@ class FileExplorerWidget(QWidget):
 
         # 모델 로드
         self.model.load(path)
+
+        # 정렬 다시 설정
+        self.proxy_model.sort(-1, Qt.SortOrder.AscendingOrder)
+
+    def _navigate_with_pattern(self, dir_path: str, glob_pattern: str):
+        """glob 패턴과 함께 네비게이션을 처리한다."""
+        # 주소 바에 전체 경로 + 패턴 표시
+        display_path = os.path.join(dir_path, glob_pattern)
+        self.nav_bar.update_path(display_path)
+        self.nav_bar.set_back_enabled(False)
+        self.nav_bar.set_forward_enabled(False)
+
+        # 모델 로드 (glob 패턴 포함)
+        self.model.load(dir_path, glob_pattern)
 
         # 정렬 다시 설정
         self.proxy_model.sort(-1, Qt.SortOrder.AscendingOrder)

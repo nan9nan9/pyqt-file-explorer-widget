@@ -1,5 +1,6 @@
 """백그라운드 디렉토리 스캔 워커 (QThread)"""
 import os
+import fnmatch
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -10,9 +11,10 @@ class DirectoryLoader(QThread):
     chunk_ready = pyqtSignal(list)  # 청크 단위 결과 전달
     finished = pyqtSignal(list)  # 전체 완료
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, glob_pattern: str = None):
         super().__init__()
         self.path = path
+        self.glob_pattern = glob_pattern  # glob 필터 패턴
         self._cancelled = False
         self._chunk_size = 500  # 청크 크기
 
@@ -27,6 +29,11 @@ class DirectoryLoader(QThread):
                     # 취소 플래그 확인
                     if self._cancelled:
                         return
+
+                    # glob 패턴이 지정된 경우 필터링
+                    if self.glob_pattern:
+                        if not fnmatch.fnmatch(entry.name, self.glob_pattern):
+                            continue
 
                     try:
                         # stat 정보 한 번에 가져오기

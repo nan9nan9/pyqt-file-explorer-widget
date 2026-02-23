@@ -43,7 +43,7 @@ class FileTableModel(QAbstractTableModel):
             self._icon_cache["__dir__"] = QIcon()
             self._icon_cache["__file__"] = QIcon()
 
-    def load(self, path: str):
+    def load(self, path: str, glob_pattern: str = None):
         """경로의 항목을 로드한다."""
         self._current_path = path
 
@@ -56,9 +56,9 @@ class FileTableModel(QAbstractTableModel):
         self._items = []
         self.endResetModel()
 
-        # .. 항목을 미리 추가 (루트가 아닐 경우)
+        # .. 항목을 미리 추가 (루트가 아닐 경우, glob 필터가 없을 때만)
         parent_dir = os.path.dirname(path)
-        if parent_dir and parent_dir != path:
+        if not glob_pattern and parent_dir and parent_dir != path:
             parent_item = {
                 "name": "..",
                 "path": parent_dir,
@@ -72,7 +72,7 @@ class FileTableModel(QAbstractTableModel):
             self.endInsertRows()
 
         # 새로운 로더 생성
-        self._loader = DirectoryLoader(path)
+        self._loader = DirectoryLoader(path, glob_pattern)
         self._loader.chunk_ready.connect(self._on_chunk_ready)
         self._loader.finished.connect(self._on_finished)
         self._loader.start()
