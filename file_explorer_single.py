@@ -1,15 +1,18 @@
 """
 PyQt6 파일 탐색기 위젯 - 단일 파일 버전
 스탠드얼론으로 사용 가능한 파일 탐색기 위젯
+glob 패턴 필터링 기능 지원
 """
 
 import os
+import sys
+import fnmatch
 from datetime import datetime
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QFileInfo, QThread, pyqtSignal, QUrl, QSortFilterProxyModel
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QFileInfo, QThread, pyqtSignal, QSortFilterProxyModel
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
-    QTableView, QHeaderView, QApplication, QMainWindow, QFileIconProvider
+    QTableView, QHeaderView, QApplication, QMainWindow, QFileIconProvider, QAbstractItemView
 )
 
 
@@ -19,9 +22,10 @@ class DirectoryLoader(QThread):
     chunk_ready = pyqtSignal(list)  # 청크 단위 결과 전달
     finished = pyqtSignal(list)  # 전체 완료
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, glob_pattern: str = None):
         super().__init__()
         self.path = path
+        self.glob_pattern = glob_pattern  # glob 필터 패턴
         self._cancelled = False
         self._chunk_size = 500  # 청크 크기
 
@@ -36,6 +40,11 @@ class DirectoryLoader(QThread):
                     # 취소 플래그 확인
                     if self._cancelled:
                         return
+
+                    # glob 패턴이 지정된 경우 필터링
+                    if self.glob_pattern:
+                        if not fnmatch.fnmatch(entry.name, self.glob_pattern):
+                            continue
 
                     try:
                         # stat 정보 한 번에 가져오기
@@ -117,7 +126,7 @@ class FileTableModel(QAbstractTableModel):
             self._icon_cache["__dir__"] = QIcon()
             self._icon_cache["__file__"] = QIcon()
 
-    def load(self, path: str):
+    def load(self, path: str, glob_pattern: str = None):
         """경로의 항목을 로드한다."""
         self._current_path = path
 
@@ -130,9 +139,9 @@ class FileTableModel(QAbstractTableModel):
         self._items = []
         self.endResetModel()
 
-        # .. 항목을 미리 추가 (루트가 아닐 경우)
+        # .. 항목을 미리 추가 (루트가 아닐 경우, glob 필터가 없을 때만)
         parent_dir = os.path.dirname(path)
-        if parent_dir and parent_dir != path:
+        if not glob_pattern and parent_dir and parent_dir != path:
             parent_item = {
                 "name": "..",
                 "path": parent_dir,
@@ -146,7 +155,7 @@ class FileTableModel(QAbstractTableModel):
             self.endInsertRows()
 
         # 새로운 로더 생성
-        self._loader = DirectoryLoader(path)
+        self._loader = DirectoryLoader(path, glob_pattern)
         self._loader.chunk_ready.connect(self._on_chunk_ready)
         self._loader.finished.connect(self._on_finished)
         self._loader.start()
@@ -356,6 +365,27 @@ class NavigationBar(QWidget):
         self.forward_btn.setEnabled(enabled)
 
 
+def parse_path_with_pattern(input_path: str):
+    """경로와 glob 패턴을 분리한다.
+
+    예: "/home/user/*.py" -> ("/home/user", "*.py")
+    예: "/home/user" -> ("/home/user", None)
+    """
+    # * 또는 ? 가 포함되어 있으면 glob 패턴으로 간주
+    if '*' in input_path or '?' in input_path:
+        # 마지막 경로 구분자를 찾아서 디렉토리와 패턴 분리
+        last_sep_idx = input_path.rfind(os.sep)
+        if last_sep_idx != -1:
+            dir_path = input_path[:last_sep_idx]
+            pattern = input_path[last_sep_idx + 1:]
+            return dir_path, pattern
+        else:
+            # 구분자가 없으면 현재 디렉토리에서 패턴 적용
+            return os.getcwd(), input_path
+
+    return input_path, None
+
+
 class FileExplorerWidget(QWidget):
     """파일 탐색기 메인 위젯"""
 
@@ -391,8 +421,8 @@ class FileExplorerWidget(QWidget):
         # 테이블 뷰
         self.table_view = QTableView()
         self.table_view.setModel(self.proxy_model)
-        self.table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table_view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.verticalHeader().setDefaultSectionSize(24)  # 행 높이 설정
         self.table_view.setSortingEnabled(True)  # 헤더 클릭으로 정렬 활성화
         self.table_view.doubleClicked.connect(self._on_double_clicked)
@@ -414,10 +444,21 @@ class FileExplorerWidget(QWidget):
         layout.addWidget(self.table_view)
         self.setLayout(layout)
 
-    def _on_path_changed(self, path: str):
+    def _on_path_changed(self, input_path: str):
         """사용자가 경로를 변경했을 때."""
-        if os.path.isdir(path):
-            self.navigate_to(path)
+        # 경로와 glob 패턴을 분리
+        dir_path, glob_pattern = parse_path_with_pattern(input_path)
+
+        # 절대 경로로 변환
+        dir_path = os.path.abspath(dir_path)
+
+        if os.path.isdir(dir_path):
+            if glob_pattern:
+                # glob 패턴이 있으면 경로와 패턴을 함께 전달
+                self._navigate_with_pattern(dir_path, glob_pattern)
+            else:
+                # 일반 경로 네비게이션
+                self.navigate_to(dir_path)
 
     def _on_back(self):
         """뒤로가기."""
@@ -476,11 +517,23 @@ class FileExplorerWidget(QWidget):
         # 정렬 다시 설정
         self.proxy_model.sort(-1, Qt.SortOrder.AscendingOrder)
 
+    def _navigate_with_pattern(self, dir_path: str, glob_pattern: str):
+        """glob 패턴과 함께 네비게이션을 처리한다."""
+        # 주소 바에 전체 경로 + 패턴 표시
+        display_path = os.path.join(dir_path, glob_pattern)
+        self.nav_bar.update_path(display_path)
+        self.nav_bar.set_back_enabled(False)
+        self.nav_bar.set_forward_enabled(False)
+
+        # 모델 로드 (glob 패턴 포함)
+        self.model.load(dir_path, glob_pattern)
+
+        # 정렬 다시 설정
+        self.proxy_model.sort(-1, Qt.SortOrder.AscendingOrder)
+
 
 # 스탠드얼론 실행용
 if __name__ == "__main__":
-    import sys
-
     app = QApplication(sys.argv)
     window = QMainWindow()
     window.setWindowTitle("파일 탐색기")
