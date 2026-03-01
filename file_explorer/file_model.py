@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QFileInfo
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QFileIconProvider
-from loader import DirectoryLoader
+from .loader import DirectoryLoader
 
 
 class FileTableModel(QAbstractTableModel):

@@ -2,7 +2,7 @@
 import sys
 import os
 from PyQt6.QtWidgets import QApplication, QMainWindow
-from explorer_widget import FileExplorerWidget
+from .explorer_widget import FileExplorerWidget
 
 
 def main():

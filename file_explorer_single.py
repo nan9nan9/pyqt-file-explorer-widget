@@ -328,13 +328,13 @@ class NavigationBar(QWidget):
 
         # 뒤로가기 버튼
         self.back_btn = QPushButton("◄")
-        self.back_btn.setMaximumWidth(50)
+        self.back_btn.setFixedWidth(24)
         self.back_btn.clicked.connect(self.back_requested.emit)
         layout.addWidget(self.back_btn)
 
         # 앞으로가기 버튼
         self.forward_btn = QPushButton("►")
-        self.forward_btn.setMaximumWidth(50)
+        self.forward_btn.setFixedWidth(24)
         self.forward_btn.clicked.connect(self.forward_requested.emit)
         layout.addWidget(self.forward_btn)
 

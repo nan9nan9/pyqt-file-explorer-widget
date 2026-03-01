@@ -1,10 +1,10 @@
 """파일 탐색기 메인 위젯"""
 import os
 from pathlib import Path
-from PyQt6.QtCore import Qt, QModelIndex, QSortFilterProxyModel
+from PyQt6.QtCore import Qt, QModelIndex, QSortFilterProxyModel, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTableView, QHeaderView
-from file_model import FileTableModel
-from navigation_bar import NavigationBar
+from .file_model import FileTableModel
+from .navigation_bar import NavigationBar
 
 
 def parse_path_with_pattern(input_path: str):
@@ -30,6 +30,9 @@ def parse_path_with_pattern(input_path: str):
 
 class FileExplorerWidget(QWidget):
     """파일 탐색기 메인 위젯"""
+
+    # 파일 더블클릭 시 파일 경로를 전달하는 시그널
+    fileDoubleClicked = pyqtSignal(str)
 
     def __init__(self, initial_path: str = None, parent=None):
         super().__init__(parent)
@@ -131,6 +134,9 @@ class FileExplorerWidget(QWidget):
         if item["is_dir"]:
             # 디렉토리: 진입
             self.navigate_to(path)
+        else:
+            # 파일: 시그널 발생
+            self.fileDoubleClicked.emit(path)
 
     def navigate_to(self, path: str):
         """경로로 이동한다."""
